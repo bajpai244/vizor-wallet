@@ -30,6 +30,12 @@ pub struct AccountCreationResult {
     pub unified_address: String,
 }
 
+/// Result of deriving a software account without importing it into the wallet DB.
+pub struct SoftwareAccountPreviewResult {
+    pub mnemonic: String,
+    pub unified_address: String,
+}
+
 /// Result of software mnemonic import with ZIP32 account discovery.
 pub struct SoftwareWalletImportWithDiscoveryResult {
     pub accounts: Vec<SoftwareWalletImportAccount>,
@@ -197,6 +203,25 @@ pub fn add_account(
 
         Ok(AccountCreationResult {
             account_uuid,
+            unified_address,
+        })
+    })
+}
+
+/// Generate a software account mnemonic and shielded address without touching
+/// the wallet DB. Used when the app needs an external recipient controlled by
+/// a fresh seed, such as payment-link funding.
+pub fn preview_new_software_account(
+    network: String,
+) -> Result<SoftwareAccountPreviewResult, String> {
+    catch(|| {
+        let network = keys::parse_network(&network)?;
+        let mnemonic = keys::generate_mnemonic();
+        let seed = keys::mnemonic_to_seed(&mnemonic)?;
+        let unified_address = keys::software_account_unified_address(network, &seed, 0)?;
+
+        Ok(SoftwareAccountPreviewResult {
+            mnemonic,
             unified_address,
         })
     })

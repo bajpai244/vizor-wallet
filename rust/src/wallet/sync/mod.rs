@@ -40,7 +40,7 @@ pub use pczt::{
     add_proofs_to_pczt, create_pczt_from_proposal, discard_proposal, extract_and_broadcast_pczt,
     redact_pczt_for_signer, ExtractAndBroadcastPcztResult,
 };
-pub(crate) use send::estimate_send_max;
+pub(crate) use send::propose_send_min_confirmations;
 pub(crate) use send::{
     create_shield_transparent_pczt, get_shield_transparent_status, shield_transparent_balance,
 };
@@ -48,6 +48,7 @@ pub use send::{
     estimate_fee, execute_proposal, execute_proposal_with_seed_loader, propose_send,
     ExecuteProposalResult,
 };
+pub(crate) use send::{estimate_send_max, estimate_send_max_min_confirmations};
 // Internal-only re-export for `sync_engine::run_sync_impl`'s
 // auto-resubmit pass. Not part of the `wallet::sync` public surface.
 pub(crate) use send::resubmit_pending_transactions;

@@ -3,13 +3,20 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart'
-    show CircularProgressIndicator, Colors, ScaffoldMessenger, SnackBar;
+    show
+        CircularProgressIndicator,
+        Colors,
+        ScaffoldMessenger,
+        SelectableText,
+        SnackBar;
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pretty_qr_code/pretty_qr_code.dart';
 
 import '../../../../main.dart' show log;
 import '../../../core/config/network_config.dart';
+import '../../../core/formatting/zec_amount.dart';
 import '../../../core/layout/app_desktop_shell.dart';
 import '../../../core/layout/app_layout.dart';
 import '../../../core/layout/app_main_sidebar.dart';
@@ -19,11 +26,16 @@ import '../../../core/widgets/app_back_link.dart';
 import '../../../core/widgets/app_button.dart';
 import '../../../core/widgets/app_icon.dart';
 import '../../../core/widgets/app_pane_modal_overlay.dart';
+import '../../../core/widgets/app_text_field.dart';
 import '../../../providers/account_provider.dart';
 import '../../../providers/receive_address_provider.dart';
 import '../../../providers/wallet_provider.dart';
+import '../../payment_links/models/vizor_payment_link.dart';
+import '../../payment_links/services/payment_link_service.dart';
 
 enum _ReceiveAddressType { shielded, transparent }
+
+enum _PaymentLinkClaimStep { entry, scanning, review, claiming, complete }
 
 const _renewShieldedAddressErrorMessage =
     "We couldn't refresh your shielded address. Try again, or use your current one.";
@@ -36,6 +48,7 @@ class ReceiveScreen extends ConsumerStatefulWidget {
 }
 
 class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
+  final _paymentLinkController = TextEditingController();
   _ReceiveAddressType _selectedType = _ReceiveAddressType.shielded;
   String? _shieldedAddress;
   String? _transparentAddress;
@@ -47,10 +60,28 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
   bool _isLoading = true;
   bool _isLoadingTransparent = false;
   bool _isRenewingShielded = false;
+  bool _paymentLinkMode = false;
+  _PaymentLinkClaimStep _paymentLinkStep = _PaymentLinkClaimStep.entry;
+  PaymentLinkClaimSession? _paymentLinkSession;
+  String? _paymentLinkClaimTxids;
+  String? _paymentLinkStatus;
+  String? _paymentLinkError;
+  late final PaymentLinkService _paymentLinkService;
+
+  @override
+  void dispose() {
+    final session = _paymentLinkSession;
+    if (session != null) {
+      unawaited(_paymentLinkService.discardClaimSession(session));
+    }
+    _paymentLinkController.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
     super.initState();
+    _paymentLinkService = ref.read(paymentLinkServiceProvider);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(appLayoutProvider.notifier).setMode(AppLayoutMode.large);
@@ -230,6 +261,104 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
     copyTextWithToast(context, text: address, toastMessage: 'Address copied');
   }
 
+  Future<void> _pastePaymentLinkFromClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (!mounted) return;
+    final text = data?.text;
+    if (text == null || text.trim().isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Clipboard is empty')));
+      return;
+    }
+
+    _paymentLinkController.text = text.trim();
+    _resetPaymentLinkClaim(clearInput: false);
+  }
+
+  void _resetPaymentLinkClaim({bool clearInput = false}) {
+    final session = _paymentLinkSession;
+    if (session != null) {
+      unawaited(_paymentLinkService.discardClaimSession(session));
+    }
+    setState(() {
+      if (clearInput) {
+        _paymentLinkController.clear();
+      }
+      _paymentLinkStep = _PaymentLinkClaimStep.entry;
+      _paymentLinkSession = null;
+      _paymentLinkClaimTxids = null;
+      _paymentLinkError = null;
+      _paymentLinkStatus = null;
+    });
+  }
+
+  Future<void> _scanPaymentLink() async {
+    if (_paymentLinkStep == _PaymentLinkClaimStep.scanning ||
+        _paymentLinkStep == _PaymentLinkClaimStep.claiming) {
+      return;
+    }
+    final previousSession = _paymentLinkSession;
+    if (previousSession != null) {
+      await _paymentLinkService.discardClaimSession(previousSession);
+    }
+    setState(() {
+      _paymentLinkStep = _PaymentLinkClaimStep.scanning;
+      _paymentLinkSession = null;
+      _paymentLinkClaimTxids = null;
+      _paymentLinkError = null;
+      _paymentLinkStatus = 'Syncing payment link';
+    });
+    try {
+      final link = VizorPaymentLink.decode(_paymentLinkController.text);
+      final session = await _paymentLinkService.prepareClaim(link);
+      if (!mounted) return;
+      setState(() {
+        _paymentLinkStep = _PaymentLinkClaimStep.review;
+        _paymentLinkSession = session;
+        _paymentLinkStatus = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _paymentLinkStep = _PaymentLinkClaimStep.entry;
+        _paymentLinkError = e.toString();
+        _paymentLinkStatus = null;
+      });
+    }
+  }
+
+  Future<void> _claimPaymentLink() async {
+    if (_paymentLinkStep == _PaymentLinkClaimStep.claiming) return;
+    final session = _paymentLinkSession;
+    if (session == null) {
+      setState(() => _paymentLinkError = 'Scan the payment link first.');
+      return;
+    }
+    setState(() {
+      _paymentLinkStep = _PaymentLinkClaimStep.claiming;
+      _paymentLinkError = null;
+      _paymentLinkStatus = 'Claiming payment link';
+    });
+    try {
+      final txids = await _paymentLinkService.claimPreparedLink(session);
+      if (!mounted) return;
+      setState(() {
+        _paymentLinkStep = _PaymentLinkClaimStep.complete;
+        _paymentLinkSession = null;
+        _paymentLinkClaimTxids = txids;
+        _paymentLinkStatus = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _paymentLinkStep = _PaymentLinkClaimStep.review;
+        _paymentLinkError = e.toString();
+        _paymentLinkStatus = null;
+      });
+    }
+  }
+
   void _selectAddressType(_ReceiveAddressType type) {
     if (_selectedType == type) return;
 
@@ -285,9 +414,27 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
               errorText: selectedErrorText,
               isLoading: isLoadingSelectedAddress,
               isRenewingShielded: _isRenewingShielded,
+              paymentLinkMode: _paymentLinkMode,
+              paymentLinkController: _paymentLinkController,
+              paymentLinkStep: _paymentLinkStep,
+              paymentLinkSession: _paymentLinkSession,
+              paymentLinkClaimTxids: _paymentLinkClaimTxids,
+              paymentLinkStatus: _paymentLinkStatus,
+              paymentLinkError: _paymentLinkError,
+              onModeChanged: (value) {
+                setState(() {
+                  _paymentLinkMode = value;
+                });
+                _resetPaymentLinkClaim(clearInput: false);
+              },
               onTypeChanged: _selectAddressType,
               onRenewShielded: isShielded ? _renewShieldedAddress : null,
               onCopy: _copySelectedAddress,
+              onPastePaymentLink: _pastePaymentLinkFromClipboard,
+              onScanPaymentLink: _scanPaymentLink,
+              onClaimPaymentLink: _claimPaymentLink,
+              onResetPaymentLink: () =>
+                  _resetPaymentLinkClaim(clearInput: true),
               onShowHelp: () => _showAddressInfo(_selectedType),
             ),
             if (infoDialogType != null)
@@ -312,9 +459,21 @@ class _ReceivePane extends StatelessWidget {
     required this.errorText,
     required this.isLoading,
     required this.isRenewingShielded,
+    required this.paymentLinkMode,
+    required this.paymentLinkController,
+    required this.paymentLinkStep,
+    required this.paymentLinkSession,
+    required this.paymentLinkClaimTxids,
+    required this.paymentLinkStatus,
+    required this.paymentLinkError,
+    required this.onModeChanged,
     required this.onTypeChanged,
     required this.onRenewShielded,
     required this.onCopy,
+    required this.onPastePaymentLink,
+    required this.onScanPaymentLink,
+    required this.onClaimPaymentLink,
+    required this.onResetPaymentLink,
     required this.onShowHelp,
   });
 
@@ -323,9 +482,21 @@ class _ReceivePane extends StatelessWidget {
   final String? errorText;
   final bool isLoading;
   final bool isRenewingShielded;
+  final bool paymentLinkMode;
+  final TextEditingController paymentLinkController;
+  final _PaymentLinkClaimStep paymentLinkStep;
+  final PaymentLinkClaimSession? paymentLinkSession;
+  final String? paymentLinkClaimTxids;
+  final String? paymentLinkStatus;
+  final String? paymentLinkError;
+  final ValueChanged<bool> onModeChanged;
   final ValueChanged<_ReceiveAddressType> onTypeChanged;
   final VoidCallback? onRenewShielded;
   final VoidCallback onCopy;
+  final VoidCallback onPastePaymentLink;
+  final VoidCallback onScanPaymentLink;
+  final VoidCallback onClaimPaymentLink;
+  final VoidCallback onResetPaymentLink;
   final VoidCallback onShowHelp;
 
   @override
@@ -339,18 +510,43 @@ class _ReceivePane extends StatelessWidget {
             minWidth: 60,
           ),
         ),
-        Expanded(
-          child: _ReceiveContentLayout(
-            selectedType: selectedType,
-            address: address,
-            errorText: errorText,
-            isLoading: isLoading,
-            isRenewingShielded: isRenewingShielded,
-            onTypeChanged: onTypeChanged,
-            onRenewShielded: onRenewShielded,
-            onCopy: onCopy,
-            onShowHelp: onShowHelp,
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.lg,
+            AppSpacing.md,
+            AppSpacing.lg,
+            0,
           ),
+          child: _ReceiveModeSwitch(
+            paymentLinkMode: paymentLinkMode,
+            onChanged: onModeChanged,
+          ),
+        ),
+        Expanded(
+          child: paymentLinkMode
+              ? _ReceivePaymentLinkClaimContent(
+                  controller: paymentLinkController,
+                  step: paymentLinkStep,
+                  session: paymentLinkSession,
+                  claimTxids: paymentLinkClaimTxids,
+                  status: paymentLinkStatus,
+                  error: paymentLinkError,
+                  onPaste: onPastePaymentLink,
+                  onNext: onScanPaymentLink,
+                  onClaim: onClaimPaymentLink,
+                  onReset: onResetPaymentLink,
+                )
+              : _ReceiveContentLayout(
+                  selectedType: selectedType,
+                  address: address,
+                  errorText: errorText,
+                  isLoading: isLoading,
+                  isRenewingShielded: isRenewingShielded,
+                  onTypeChanged: onTypeChanged,
+                  onRenewShielded: onRenewShielded,
+                  onCopy: onCopy,
+                  onShowHelp: onShowHelp,
+                ),
         ),
       ],
     );
@@ -501,6 +697,336 @@ class _ReceiveContentLayout extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+class _ReceiveModeSwitch extends StatelessWidget {
+  const _ReceiveModeSwitch({
+    required this.paymentLinkMode,
+    required this.onChanged,
+  });
+
+  final bool paymentLinkMode;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            AppButton(
+              key: const ValueKey('receive_mode_address_button'),
+              onPressed: () => onChanged(false),
+              variant: paymentLinkMode
+                  ? AppButtonVariant.secondary
+                  : AppButtonVariant.primary,
+              child: const Text('Address'),
+            ),
+            const SizedBox(height: AppSpacing.xs),
+            AppButton(
+              key: const ValueKey('receive_mode_payment_link_button'),
+              onPressed: () => onChanged(true),
+              variant: paymentLinkMode
+                  ? AppButtonVariant.primary
+                  : AppButtonVariant.secondary,
+              child: const Text('Payment link'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ReceivePaymentLinkClaimContent extends StatelessWidget {
+  const _ReceivePaymentLinkClaimContent({
+    required this.controller,
+    required this.step,
+    required this.session,
+    required this.claimTxids,
+    required this.status,
+    required this.error,
+    required this.onPaste,
+    required this.onNext,
+    required this.onClaim,
+    required this.onReset,
+  });
+
+  final TextEditingController controller;
+  final _PaymentLinkClaimStep step;
+  final PaymentLinkClaimSession? session;
+  final String? claimTxids;
+  final String? status;
+  final String? error;
+  final VoidCallback onPaste;
+  final VoidCallback onNext;
+  final VoidCallback onClaim;
+  final VoidCallback onReset;
+
+  String _formatZec(BigInt zatoshi) => ZecAmount.fromZatoshi(
+    zatoshi,
+  ).pretty(denomStyle: ZecDenomStyle.upper).toString();
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final isBusy =
+        step == _PaymentLinkClaimStep.scanning ||
+        step == _PaymentLinkClaimStep.claiming;
+    final reviewedSession = session;
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 520),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Receive from payment link',
+                textAlign: TextAlign.center,
+                style: AppTypography.headlineLarge.copyWith(
+                  color: colors.text.accent,
+                ),
+              ),
+              const SizedBox(height: AppSpacing.md),
+              if (step == _PaymentLinkClaimStep.entry ||
+                  step == _PaymentLinkClaimStep.scanning) ...[
+                AppTextField(
+                  key: const ValueKey('receive_payment_link_field'),
+                  label: 'Payment link',
+                  hintText: 'vizor://payment-link?p=...',
+                  controller: controller,
+                  minLines: 4,
+                  maxLines: 6,
+                ),
+                const SizedBox(height: AppSpacing.md),
+                Row(
+                  children: [
+                    AppButton(
+                      key: const ValueKey('receive_payment_link_paste_button'),
+                      onPressed: isBusy ? null : onPaste,
+                      variant: AppButtonVariant.secondary,
+                      leading: const AppIcon(AppIcons.copy),
+                      child: const Text('Paste'),
+                    ),
+                    const Spacer(),
+                    AppButton(
+                      key: const ValueKey('receive_payment_link_next_button'),
+                      onPressed: isBusy ? null : onNext,
+                      leading: isBusy
+                          ? const AppIcon(AppIcons.loader)
+                          : const AppIcon(AppIcons.chevronForward),
+                      child: Text(isBusy ? 'Syncing...' : 'Next'),
+                    ),
+                  ],
+                ),
+              ] else if (step == _PaymentLinkClaimStep.review &&
+                  reviewedSession != null) ...[
+                _PaymentLinkAmountSummary(
+                  title: 'Available to claim',
+                  primaryAmount: _formatZec(reviewedSession.claimableZatoshi),
+                  secondaryAmount: reviewedSession.feeZatoshi > BigInt.zero
+                      ? 'Fee ${_formatZec(reviewedSession.feeZatoshi)}'
+                      : null,
+                ),
+                const SizedBox(height: AppSpacing.md),
+                Row(
+                  children: [
+                    AppButton(
+                      key: const ValueKey('receive_payment_link_back_button'),
+                      onPressed: isBusy ? null : onReset,
+                      variant: AppButtonVariant.secondary,
+                      child: const Text('Back'),
+                    ),
+                    const Spacer(),
+                    AppButton(
+                      key: const ValueKey('receive_payment_link_claim_button'),
+                      onPressed: reviewedSession.canClaim ? onClaim : null,
+                      leading: const AppIcon(AppIcons.importWallet),
+                      child: const Text('Claim'),
+                    ),
+                  ],
+                ),
+                if (!reviewedSession.canClaim) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  Text(
+                    'No funds are available in this link.',
+                    style: AppTypography.bodySmall.copyWith(
+                      color: colors.text.warning,
+                    ),
+                  ),
+                ],
+              ] else if (step == _PaymentLinkClaimStep.claiming &&
+                  reviewedSession != null) ...[
+                _PaymentLinkAmountSummary(
+                  title: 'Claiming',
+                  primaryAmount: _formatZec(reviewedSession.claimableZatoshi),
+                  secondaryAmount: 'Broadcasting sweep transaction',
+                ),
+                const SizedBox(height: AppSpacing.md),
+                const Center(child: CircularProgressIndicator()),
+              ] else if (step == _PaymentLinkClaimStep.complete) ...[
+                _PaymentLinkClaimCompletedSummary(txid: claimTxids),
+                const SizedBox(height: AppSpacing.md),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: AppButton(
+                    key: const ValueKey('receive_payment_link_done_button'),
+                    onPressed: onReset,
+                    variant: AppButtonVariant.secondary,
+                    child: const Text('Done'),
+                  ),
+                ),
+              ],
+              if (status != null) ...[
+                const SizedBox(height: AppSpacing.md),
+                Text(
+                  status!,
+                  style: AppTypography.bodySmall.copyWith(
+                    color: colors.text.positiveStrong,
+                  ),
+                ),
+              ],
+              if (error != null) ...[
+                const SizedBox(height: AppSpacing.md),
+                Text(
+                  error!,
+                  style: AppTypography.bodySmall.copyWith(
+                    color: colors.text.destructive,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PaymentLinkClaimCompletedSummary extends StatelessWidget {
+  const _PaymentLinkClaimCompletedSummary({required this.txid});
+
+  final String? txid;
+
+  String? get _displayTxid {
+    final value = txid;
+    if (value == null || value.isEmpty) return null;
+    if (value.length <= 32) return value;
+    return '${value.substring(0, 18)}...${value.substring(value.length - 12)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final displayTxid = _displayTxid;
+    return Container(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      decoration: BoxDecoration(
+        color: colors.surface.card,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: colors.border.subtle),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Claim completed',
+            style: AppTypography.bodyMedium.copyWith(
+              color: colors.text.secondary,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          if (displayTxid != null) ...[
+            const SizedBox(height: AppSpacing.md),
+            Text(
+              'Transaction ID',
+              style: AppTypography.labelMedium.copyWith(
+                color: colors.text.secondary,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.xs),
+            SelectableText(
+              displayTxid,
+              style: AppTypography.bodySmall.copyWith(
+                color: colors.text.secondary,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            AppButton(
+              key: const ValueKey('receive_payment_link_copy_txid_button'),
+              onPressed: () {
+                copyTextWithToast(
+                  context,
+                  text: txid!,
+                  toastMessage: 'Transaction ID copied',
+                );
+              },
+              variant: AppButtonVariant.secondary,
+              leading: const AppIcon(AppIcons.copy),
+              child: const Text('Copy tx ID'),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _PaymentLinkAmountSummary extends StatelessWidget {
+  const _PaymentLinkAmountSummary({
+    required this.title,
+    required this.primaryAmount,
+    this.secondaryAmount,
+  });
+
+  final String title;
+  final String primaryAmount;
+  final String? secondaryAmount;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return Container(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      decoration: BoxDecoration(
+        color: colors.surface.card,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: colors.border.subtle),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: AppTypography.bodyMedium.copyWith(
+              color: colors.text.secondary,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: AppSpacing.xs),
+          Text(
+            primaryAmount,
+            style: AppTypography.headlineMedium.copyWith(
+              color: colors.text.accent,
+            ),
+          ),
+          if (secondaryAmount != null) ...[
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              secondaryAmount!,
+              style: AppTypography.bodySmall.copyWith(
+                color: colors.text.secondary,
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }

@@ -195,6 +195,49 @@ pub fn propose_send(
     amount_zatoshi: u64,
     memo_str: Option<&str>,
 ) -> Result<ProposalResult, String> {
+    propose_send_with_confirmations_policy(
+        db_path,
+        network,
+        account_uuid,
+        send_flow_id,
+        to_address,
+        amount_zatoshi,
+        memo_str,
+        ConfirmationsPolicy::default(),
+    )
+}
+
+pub(crate) fn propose_send_min_confirmations(
+    db_path: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+    send_flow_id: &str,
+    to_address: &str,
+    amount_zatoshi: u64,
+    memo_str: Option<&str>,
+) -> Result<ProposalResult, String> {
+    propose_send_with_confirmations_policy(
+        db_path,
+        network,
+        account_uuid,
+        send_flow_id,
+        to_address,
+        amount_zatoshi,
+        memo_str,
+        ConfirmationsPolicy::MIN,
+    )
+}
+
+fn propose_send_with_confirmations_policy(
+    db_path: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+    send_flow_id: &str,
+    to_address: &str,
+    amount_zatoshi: u64,
+    memo_str: Option<&str>,
+    confirmations_policy: ConfirmationsPolicy,
+) -> Result<ProposalResult, String> {
     use zcash_protocol::{PoolType, ShieldedProtocol as SP};
 
     if send_flow_id.is_empty() {
@@ -230,7 +273,7 @@ pub fn propose_send(
         &input_selector,
         &change_strategy,
         request,
-        ConfirmationsPolicy::default(),
+        confirmations_policy,
         None,
     )
     .map_err(|e| format!("Propose failed: {e}"))?;
@@ -338,7 +381,34 @@ pub(crate) fn estimate_send_max(
 ) -> Result<SendMaxEstimateResult, String> {
     let mut db = open_wallet_db_for_read(db_path, network)?;
     let account_id = parse_account_uuid(account_uuid)?;
-    let proposal = build_send_max_proposal(&mut db, network, account_id, to_address, memo_str)?;
+    let proposal = build_send_max_proposal(
+        &mut db,
+        network,
+        account_id,
+        to_address,
+        memo_str,
+        ConfirmationsPolicy::default(),
+    )?;
+    summarize_send_max_proposal(&proposal)
+}
+
+pub(crate) fn estimate_send_max_min_confirmations(
+    db_path: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+    to_address: &str,
+    memo_str: Option<&str>,
+) -> Result<SendMaxEstimateResult, String> {
+    let mut db = open_wallet_db_for_read(db_path, network)?;
+    let account_id = parse_account_uuid(account_uuid)?;
+    let proposal = build_send_max_proposal(
+        &mut db,
+        network,
+        account_id,
+        to_address,
+        memo_str,
+        ConfirmationsPolicy::MIN,
+    )?;
     summarize_send_max_proposal(&proposal)
 }
 
@@ -654,6 +724,7 @@ fn build_send_max_proposal(
     account_id: AccountUuid,
     to_address: &str,
     memo_str: Option<&str>,
+    confirmations_policy: ConfirmationsPolicy,
 ) -> Result<Proposal<WalletFeeRule, <WalletDatabase as InputSource>::NoteRef>, String> {
     let to: zcash_address::ZcashAddress = to_address
         .parse()
@@ -677,7 +748,7 @@ fn build_send_max_proposal(
         to,
         memo_bytes,
         MaxSpendMode::MaxSpendable,
-        ConfirmationsPolicy::default(),
+        confirmations_policy,
     )
     .map_err(|e| format!("Propose max failed: {e}"))
 }

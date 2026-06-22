@@ -660,6 +660,39 @@ pub fn propose_send(
     })
 }
 
+/// Step 1: Propose a transfer using the minimum shielded confirmation policy.
+///
+/// This is intentionally separate from normal sends. It is used for
+/// payment-link claims, where the temporary wallet only sweeps a freshly funded
+/// one-time account and product wants funds available after 1 confirmation.
+pub fn propose_send_min_confirmations(
+    db_path: String,
+    network: String,
+    account_uuid: String,
+    send_flow_id: String,
+    to_address: String,
+    amount_zatoshi: u64,
+    memo: Option<String>,
+) -> Result<ProposalResult, String> {
+    catch(|| {
+        let network = parse_network_and_migrate(&db_path, &network)?;
+        let r = wallet_sync::propose_send_min_confirmations(
+            &db_path,
+            network,
+            &account_uuid,
+            &send_flow_id,
+            &to_address,
+            amount_zatoshi,
+            memo.as_deref(),
+        )?;
+        Ok(ProposalResult {
+            proposal_id: r.proposal_id,
+            needs_sapling_params: r.needs_sapling_params,
+            fee_zatoshi: r.fee_zatoshi,
+        })
+    })
+}
+
 /// Estimate the fee for a transfer without storing a proposal.
 pub fn estimate_fee(
     db_path: String,
@@ -693,6 +726,34 @@ pub fn estimate_send_max(
     catch(|| {
         let network = parse_network_and_migrate(&db_path, &network)?;
         let r = wallet_sync::estimate_send_max(
+            &db_path,
+            network,
+            &account_uuid,
+            &to_address,
+            memo.as_deref(),
+        )?;
+        Ok(SendMaxEstimateResult {
+            amount_zatoshi: r.amount_zatoshi,
+            fee_zatoshi: r.fee_zatoshi,
+            needs_sapling_params: r.needs_sapling_params,
+        })
+    })
+}
+
+/// Estimate max send using the minimum shielded confirmation policy.
+///
+/// Payment-link claims use this before `propose_send_min_confirmations` so the
+/// estimate and real proposal agree on 1-confirmation spendability.
+pub fn estimate_send_max_min_confirmations(
+    db_path: String,
+    network: String,
+    account_uuid: String,
+    to_address: String,
+    memo: Option<String>,
+) -> Result<SendMaxEstimateResult, String> {
+    catch(|| {
+        let network = parse_network_and_migrate(&db_path, &network)?;
+        let r = wallet_sync::estimate_send_max_min_confirmations(
             &db_path,
             network,
             &account_uuid,

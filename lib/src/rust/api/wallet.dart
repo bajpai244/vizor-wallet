@@ -64,6 +64,15 @@ Future<AccountCreationResult> addAccount({
   birthdayHeight: birthdayHeight,
 );
 
+/// Generate a software account mnemonic and shielded address without touching
+/// the wallet DB. Used when the app needs an external recipient controlled by
+/// a fresh seed, such as payment-link funding.
+Future<SoftwareAccountPreviewResult> previewNewSoftwareAccount({
+  required String network,
+}) => RustLib.instance.api.crateApiWalletPreviewNewSoftwareAccount(
+  network: network,
+);
+
 /// Discover higher ZIP32 software accounts with transparent history that are
 /// not already present in the wallet DB for this mnemonic.
 Future<SoftwareWalletImportDiscoveryResult>
@@ -267,6 +276,28 @@ class AccountInfo {
           unifiedAddress == other.unifiedAddress &&
           isSeedAnchor == other.isSeedAnchor &&
           isHardware == other.isHardware;
+}
+
+/// Result of deriving a software account without importing it into the wallet DB.
+class SoftwareAccountPreviewResult {
+  final String mnemonic;
+  final String unifiedAddress;
+
+  const SoftwareAccountPreviewResult({
+    required this.mnemonic,
+    required this.unifiedAddress,
+  });
+
+  @override
+  int get hashCode => mnemonic.hashCode ^ unifiedAddress.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SoftwareAccountPreviewResult &&
+          runtimeType == other.runtimeType &&
+          mnemonic == other.mnemonic &&
+          unifiedAddress == other.unifiedAddress;
 }
 
 /// A higher ZIP32 software account that can be imported by user choice.
